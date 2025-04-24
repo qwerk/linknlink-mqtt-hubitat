@@ -1,6 +1,6 @@
 Wih this driver you can create a device that listens to mqtt entries.
 linknlink uses a json entry, with is not accepted by the mqtt-listener created by "Cecil Coupe", 
-importURL: "https://raw.githubusercontent.com/ccoupe/hubitat/master/raw/mqtt-listen-switch.groovy"
+https://github.com/ccoupe/hubitat
 
 I changed the code so it would.
 
