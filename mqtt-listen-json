@@ -15,7 +15,7 @@
  *  Changes:
  *
  *  1.0.0 - Initial release
- *  1.1.0 - Added JSON parsing for pir_detected (by Perplexity AI)
+ *  1.1.0 - Added JSON parsing for pir_detected (by Qwerk)
  */
 
 import groovy.json.JsonSlurper
