@@ -16,7 +16,10 @@
  *
  *  1.0.0 - Initial release
  *  1.1.0 - Added JSON parsing for pir_detected (by Qwerk)
- */
+*
+*
+* at preferences: Topic to subscribe : home/e04b4100ca6a0000000000009eac0000_2/status ( example)
+*/
 
 import groovy.json.JsonSlurper
 
