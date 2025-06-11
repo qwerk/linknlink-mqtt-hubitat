@@ -1,0 +1,189 @@
+/*
+ * MQTT Multi-Zone Motion & Environment Sensor (Parent with Child Devices)
+ * - 5 motion zones (each as a child device, enable/disable via preferences)
+ * - Temperature, humidity, and illuminance on parent device
+ * - JSON payloads as described by user
+ * Author: Perplexity AI, 2025
+ */
+
+import groovy.json.JsonSlurper
+
+metadata {
+    definition (name: "MQTT Multi-Zone Motion Parent", namespace: "custom", author: "Perplexity AI") {
+        capability "Initialize"
+        capability "TemperatureMeasurement"
+        capability "RelativeHumidityMeasurement"
+        capability "IlluminanceMeasurement"
+    }
+}
+
+preferences {
+    input name: "MQTTBroker", type: "text", title: "MQTT Broker Address (host or IP):", required: true
+    input name: "username", type: "text", title: "MQTT Username (optional):", required: false
+    input name: "password", type: "password", title: "MQTT Password (optional):", required: false
+    input name: "baseTopic", type: "text", title: "Base Topic (e.g. home/macaddress000000):", required: true
+    input name: "zone0Enabled", type: "bool", title: "Enable Zone 0", defaultValue: true
+    input name: "zone1Enabled", type: "bool", title: "Enable Zone 1", defaultValue: true
+    input name: "zone2Enabled", type: "bool", title: "Enable Zone 2", defaultValue: true
+    input name: "zone3Enabled", type: "bool", title: "Enable Zone 3", defaultValue: true
+    input name: "zone4Enabled", type: "bool", title: "Enable Zone 4", defaultValue: true
+    input name: "AutoOff", type: "bool", title: "Enable Motion Auto-Off (childs)", defaultValue: false
+    input name: "offSecs", type: "number", title: "Auto-Off Seconds", defaultValue: 10
+    input name: "logEnable", type: "bool", title: "Enable Debug Logging", defaultValue: true
+}
+
+def installed() {
+    log.info "Installed..."
+    initialize()
+}
+
+def updated() {
+    log.info "Updated..."
+    initialize()
+}
+
+def uninstalled() {
+    log.info "Uninstalled, disconnecting MQTT"
+    interfaces.mqtt.disconnect()
+    deleteChildDevices()
+}
+
+def initialize() {
+    if (logEnable) runIn(1800, logsOff)
+    try {
+        def mqttInt = interfaces.mqtt
+        def mqttbroker = "tcp://${settings.MQTTBroker}:1883"
+        def clientId = "hubitat_${device.id}"
+        log.info "Connecting to MQTT broker at ${mqttbroker} as ${clientId}"
+        mqttInt.connect(mqttbroker, clientId, settings.username, settings.password)
+        pauseExecution(1000)
+        createChildDevices()
+        subscribeToTopics()
+    } catch(e) {
+        log.error "MQTT initialize error: ${e.message}"
+    }
+}
+
+def createChildDevices() {
+    def zoneNames = ["Zone 0", "Zone 1", "Zone 2", "Zone 3", "Zone 4"]
+    for (int i = 0; i < 5; i++) {
+        def enabled = settings?."zone${i}Enabled"
+        def dni = "${device.deviceNetworkId}-zone${i}"
+        if (enabled) {
+            if (!getChildDevice(dni)) {
+                addChildDevice("hubitat", "Generic Component Motion Sensor", dni,
+                    [label: "${device.displayName} ${zoneNames[i]}", isComponent: true, name: "${zoneNames[i]}"])
+                log.info "Created child device for ${zoneNames[i]}"
+            }
+        } else {
+            // Remove child if it exists and is now disabled
+            def child = getChildDevice(dni)
+            if (child) {
+                deleteChildDevice(dni)
+                log.info "Deleted child device for ${zoneNames[i]}"
+            }
+        }
+    }
+}
+
+def deleteChildDevices() {
+    getChildDevices().each { deleteChildDevice(it.deviceNetworkId) }
+}
+
+def subscribeToTopics() {
+    for (int i = 0; i < 5; i++) {
+        if (settings?."zone${i}Enabled") {
+            def topic = "${settings.baseTopic}_${i}/status"
+            interfaces.mqtt.subscribe(topic)
+            if (logEnable) log.debug "Subscribed to presence topic: ${topic}"
+        }
+    }
+    interfaces.mqtt.subscribe("${settings.baseTopic}_t/status")
+    interfaces.mqtt.subscribe("${settings.baseTopic}_hum/status")
+    interfaces.mqtt.subscribe("${settings.baseTopic}_l/status")
+    if (logEnable) log.debug "Subscribed to temperature, humidity, and illuminance topics."
+}
+
+def parse(String description) {
+    if (logEnable) log.debug "parse() called with: ${description}"
+    def msg = interfaces.mqtt.parseMessage(description)
+    def topic = msg.topic
+    def payload = msg.payload?.replaceFirst(/^=\s*/, '')
+
+    if (logEnable) log.info "MQTT message on '${topic}': ${payload}"
+
+    try {
+        def json = new JsonSlurper().parseText(payload)
+        if (topic.endsWith("_t/status") && json.envtemp != null) {
+            handleTemperature(json.envtemp)
+        } else if (topic.endsWith("_hum/status") && json.envhumid != null) {
+            handleHumidity(json.envhumid)
+        } else if (topic.endsWith("_l/status") && json.illuminance != null) {
+            handleIlluminance(json.illuminance)
+        } else {
+            // Check for presence zones
+            def presenceZone = topic =~ /_(\d)\/status$/
+            if (presenceZone && json.pir_detected != null) {
+                def zoneNum = presenceZone[0][1] as Integer
+                if (settings?."zone${zoneNum}Enabled") {
+                    handlePresence(zoneNum, json.pir_detected)
+                }
+            }
+        }
+    } catch (Exception e) {
+        log.warn "JSON parse error: ${e.message}"
+    }
+}
+
+def handlePresence(Integer zone, pirDetected) {
+    def dni = "${device.deviceNetworkId}-zone${zone}"
+    def child = getChildDevice(dni)
+    if (child) {
+        def motionState = (pirDetected == 1) ? "active" : "inactive"
+        child.sendEvent(name: "motion", value: motionState)
+        if (pirDetected == 1 && settings.AutoOff) {
+            runIn(settings.offSecs ?: 10, { child.sendEvent(name: "motion", value: "inactive") })
+        }
+        if (logEnable) log.debug "Zone ${zone} motion: ${motionState}"
+    }
+}
+
+def handleTemperature(envtemp) {
+    def tempValue = (envtemp as Integer) / 100.0
+    sendEvent(name: "temperature", value: tempValue, unit: "°C")
+    if (logEnable) log.debug "Temperature: ${tempValue}°C"
+}
+
+def handleHumidity(envhumid) {
+    def humValue = (envhumid as Integer) / 100.0
+    sendEvent(name: "humidity", value: humValue, unit: "%")
+    if (logEnable) log.debug "Humidity: ${humValue}%"
+}
+
+def handleIlluminance(illuminance) {
+    sendEvent(name: "illuminance", value: illuminance as Integer, unit: "lux")
+    if (logEnable) log.debug "Illuminance: ${illuminance} lux"
+}
+
+def mqttClientStatus(String status) {
+    if (status.startsWith("Error")) {
+        log.warn "MQTT error: ${status}"
+        if (!interfaces.mqtt.isConnected()) {
+            log.warn "MQTT not connected, will retry in 60 seconds"
+            runIn(60, initialize)
+        }
+    } else if (logEnable) {
+        log.info "MQTT Status: ${status}"
+    }
+}
+
+def logsOff() {
+    log.warn "Debug logging disabled."
+    device.updateSetting("logEnable", [value: "false", type: "bool"])
+}
+
+// Required for component (child) devices
+def componentRefresh(cd) {}
+def componentOn(cd) {}
+def componentOff(cd) {}
+def componentTest(cd) {}
